@@ -212,26 +212,32 @@ const MODES = {
       { k: "target_a", t: "upload", narrow: true, kind: "image", multi: 2, label: "角色参考图上传", rec: true,
         addText: "添加角色参考图", hint: "上传角色全身图、主脸图或角度图。", tip: "这些图片用于替换视频人物。" },
       { k: "target_a_desc", t: "text", label: "目标 1 人物描述", rows: 2,
-        ph: "可选：例如画面中央、站在鸽子心形中间的人；也可以直接写在自然语言要求里。" },
+        def: "将源视频中的人物替换为角色参考图中的目标角色，保持原视频动作、姿势和镜头节奏。",
+        ph: "例如：画面中央的人替换为角色参考图中的目标角色。" },
       { k: "target_b", t: "upload", narrow: true, kind: "image", multi: 2, label: "场景参考图上传",
         addText: "添加场景参考图", hint: "可选：上传卧室、海边或其他场景。", tip: "上传后会切换到场景重建路线。" },
       { k: "target_b_desc", t: "text", label: "场景用途描述", rows: 2,
-        ph: "例如：用参考图2替换源视频场景，生成床、床品和合理遮挡" },
+        def: "将源视频场景替换为场景参考图中的屋主海景卧室，生成床、床品、光线、遮挡和人物与床面的合理互动。",
+        ph: "例如：用场景参考图替换源视频场景，生成床、床品和合理遮挡。" },
       { k: "prompt", t: "text", label: "自然语言要求", rec: true, rows: 4,
-        def: "", ph: "例如：保持花田、砖墙、鸽子和镜头运动，只替换这两个目标人物，保留原音轨。" },
+        def: "一键执行两阶段处理：先只替换场景并保留源视频人物，再只替换人物并锁定已生成场景。角色替换为角色参考图中的目标角色，场景替换为场景参考图中的目标环境。保留原视频动作、姿势、镜头运动、时间节奏和原音轨，清除源视频水印。",
+        ph: "例如：先换背景，再换人物，保留原动作、镜头和原音轨。" },
+      { k: "natural_pipeline", t: "seg", label: "处理方式", def: "两阶段",
+        opts: [["两阶段", "先换场景，再换人物"], ["单阶段", "一次生成，速度更快"]],
+        tip: "两阶段模式由一次点击自动完成，第一阶段重拍场景，第二阶段只替换人物。" },
       { k: "quality", t: "seg", label: "精细度", def: "标准", opts: [["标准", "4 步 · 快"], ["高质", "20 步 · 慢"]] },
-      { k: "natural_orientation", t: "seg", label: "画面方向", def: "横屏", opts: [
+      { k: "natural_orientation", t: "seg", label: "画面方向", def: "竖屏", opts: [
         ["横屏", "16:9"], ["竖屏", "9:16"]
       ] },
-      { k: "natural_resolution", t: "seg", label: "生成分辨率", def: "480p", opts: [
+      { k: "natural_resolution", t: "seg", label: "生成分辨率", def: "720p", opts: [
         ["480p", "832×480 · 稳定"], ["720p", "1280×720 · 高清"], ["1080p", "1920×1080 · 更清晰"],
         ["2K", "2560×1440 · 高负载"], ["4K", "3840×2160 · 极高负载"], ["自定义", "输入宽高"]
-      ], tip: "括号中的尺寸是横屏画布。竖屏会自动交换宽高。高分辨率会显著增加显存和生成时间。" },
+      ], tip: "括号中的尺寸是横屏画布。竖屏会自动交换宽高，H3还会吸附到安全网格（720p竖屏实际约736×1280）。高分辨率会显著增加显存和生成时间。" },
       { k: "natural_dimensions", t: "adv", label: "自定义分辨率", items: [
         { k: "natural_width", label: "宽", ph: "832" }, { k: "natural_height", label: "高", ph: "480" }
       ], tip: "仅在分辨率选择“自定义”时生效，最终会吸附到 32 的倍数。" },
       { k: "keep_audio", t: "seg", label: "音频", def: "使用原音频", opts: [["使用原音频", "跟原片一致"], ["静音", "不附加音轨"]] },
-      { k: "refsize", t: "seg", label: "参考图精度", def: "match", opts: [["match", "快"], ["max", "更像 · 慢"]] },
+      { k: "refsize", t: "seg", label: "参考图精度", def: "max", opts: [["match", "快"], ["max", "更像 · 慢"]] },
       { k: "qt", t: "text", label: "质量词", rows: 8, fold: true, def: Q.swap },
       { k: "adv", t: "adv", label: "高级参数", items: ADV_WH, tip: ADV_TIP },
     ],
@@ -867,6 +873,7 @@ async function generate() {
     }
     params.images = targetA.concat(targetB);
     params.target_descriptions = params.target_groups.map((x) => x.description);
+    params.two_phase = v.natural_pipeline !== "单阶段";
     const naturalSizes = {
       "480p": [832, 480], "720p": [1280, 720], "1080p": [1920, 1080],
       "2K": [2560, 1440], "4K": [3840, 2160]

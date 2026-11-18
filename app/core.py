@@ -748,6 +748,14 @@ def _scail_canvas(w, h):
     return w, h
 
 
+def _h3_canvas(w, h):
+    """H3 latent patchify 需要宽高落在安全的 32 像素网格。"""
+    def safe(v):
+        v = max(32, int(v or 32))
+        return max(32, int((v + 16) // 32) * 32)
+    return safe(w), safe(h)
+
+
 def _build_scail(p):
     """⑤ 的 SCAIL-2 路线：SAM3 遮罩跟踪 + 端到端角色替换。
 
@@ -1376,13 +1384,13 @@ def _wait_prompt(pid, tid, base_pct=0, span=100, est=None, mode=""):
         time.sleep(1.5)
 
 
-def _run_one(tid, api, tag, mode="", params=None):
+def _run_one(tid, api, tag, mode="", params=None, base_pct=0, span=100):
     WATCHER.reset()
     pid = submit(api)
     est = estimate_seconds(mode or "02", params or {})
     _upd(tid, status="running", started=time.time(), prompt_id=pid,
          stage=f"已交给引擎，预计 {fmt_dur(est)}", eta=est)
-    entry = _wait_prompt(pid, tid, est=est, mode=mode)
+    entry = _wait_prompt(pid, tid, base_pct=base_pct, span=span, est=est, mode=mode)
     return collect_outputs(entry or {})
 
 
@@ -1436,7 +1444,7 @@ def _worker():
                  finished=time.time(), eta=0)
 
 
-def _run_natural(tid, p, stamp):
+def _run_natural_single(tid, p, stamp):
     """自然语言多目标替换：裁切时间范围，绑定两组角色参考图后运行 H3。"""
     src = p.get("video_abs") or ""
     if not src or not os.path.isfile(src):
@@ -1485,12 +1493,14 @@ def _run_natural(tid, p, stamp):
             current.append(staged)
         staged_groups.append({"description": group["description"], "images": current})
     pp = dict(p)
+    natural_w, natural_h = _h3_canvas(int(p.get("width") or 832), int(p.get("height") or 480))
     pp.update({"video": staged_video, "images": refs, "target_groups": staged_groups,
                "natural_scene": len(staged_groups) > 1,
                "natural_route": p.get("natural_route") or "reference",
                "char_count": 0, "frames": frames, "width": int(p.get("width") or 832),
                "height": int(p.get("height") or 480), "tag": f"06_{stamp}",
                "ref_size": p.get("ref_size") or "max"})
+    pp["width"], pp["height"] = natural_w, natural_h
     api = build_api("06", pp)
     est = estimate_seconds("04", {"frames": frames, "width": 832, "height": 480,
                                   "steps": int(p.get("steps") or 4)})
@@ -1506,6 +1516,138 @@ def _run_natural(tid, p, stamp):
     shutil.rmtree(work, ignore_errors=True)
     _upd(tid, status="done", progress=100, stage="完成",
          files=outputs, finished=time.time(), eta=0)
+
+
+def _run_natural_two_phase(tid, p, stamp):
+    """一键两阶段替换：先重拍场景，再只替换人物。"""
+    src = p.get("video_abs") or ""
+    groups = p.get("target_groups") or []
+    if not src or not os.path.isfile(src):
+        raise RuntimeError("源视频不存在，请重新选择")
+    if len(groups) < 2 or any(not (g.get("images") or []) for g in groups[:2]):
+        raise RuntimeError("两阶段模式需要角色参考图和场景参考图")
+    if any(not (g.get("description") or "").strip() for g in groups[:2]):
+        raise RuntimeError("请填写角色和场景参考图用途")
+
+    info = probe_video(src)
+    duration = float(info.get("duration") or 0)
+    try:
+        start = max(0.0, float(p.get("time_start") or 0))
+        end = min(duration, float(p.get("time_end") or duration))
+    except (TypeError, ValueError):
+        raise RuntimeError("时间范围格式不正确")
+    if end <= start:
+        raise RuntimeError("结束时间必须大于开始时间")
+    requested = max(22, int(round((end - start) * 24)))
+    frames = snap_frames(requested)
+    actual_end = min(duration, start + frames / 24.0)
+    frames = max(22, int(round((actual_end - start) * 24)))
+    frames = snap_frames(frames)
+    actual_end = min(duration, start + frames / 24.0)
+    if frames < 22:
+        raise RuntimeError("时间范围太短，至少需要约 1 秒")
+
+    work = os.path.join(DATA_DIR, "work", f"{tid}_natural_two_phase")
+    os.makedirs(work, exist_ok=True)
+    crop = os.path.join(work, "source-range.mp4")
+    _upd(tid, stage=f"准备两阶段时间范围 {start:.2f}–{actual_end:.2f} 秒", progress=2)
+    run_ff([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start:.4f}", "-i", src, "-t", f"{actual_end-start:.4f}",
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "fps=24,tpad=stop_mode=clone:stop_duration=1",
+            "-frames:v", str(frames), "-r", "24",
+            "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-af", "apad", "-t", f"{frames/24.0:.4f}", crop])
+    staged_video = stage_asset(crop, sub=f"h3studio/{tid}_natural_two_phase")
+
+    role_refs = []
+    for image in groups[0].get("images") or []:
+        role_refs.append(stage_asset(image, sub=f"h3studio/{tid}_natural_two_phase"))
+    scene_refs = []
+    for image in groups[1].get("images") or []:
+        scene_refs.append(stage_asset(image, sub=f"h3studio/{tid}_natural_two_phase"))
+
+    width, height = _h3_canvas(int(p.get("width") or 1280), int(p.get("height") or 720))
+    ref_size = p.get("ref_size") or "max"
+    common = {
+        "video": staged_video, "frames": frames, "width": width, "height": height,
+        "steps": int(p.get("steps") or 4), "turbo": bool(p.get("turbo", True)),
+        "ref_size": ref_size, "keep_audio": False,
+    }
+
+    phase1_prompt = (
+        "只执行场景重拍，不替换源视频人物。\n"
+        "把源视频的整个环境替换为场景参考图中的屋主海景卧室，真实生成床、床垫、床单、枕头、床头背景、室内光线、遮挡关系、接触阴影和人物与床面的互动。\n"
+        "保留源视频人物的外观、动作、姿势、镜头运动、构图、时间节奏和人物与环境的前后关系。清除源场景水印和原有房间物件，但不要改变人物身份。"
+    )
+    phase1 = dict(common)
+    phase1.update({
+        "images": scene_refs, "target_groups": [{"description": groups[1]["description"], "images": scene_refs}],
+        "natural_scene": True, "natural_route": "video", "char_count": 0,
+        "prompt": phase1_prompt, "tag": f"06_{stamp}_phase1_scene",
+    })
+    api1 = build_api("06", phase1)
+    est1 = estimate_seconds("06", phase1)
+    _upd(tid, stage="第 1/2 阶段：只替换场景", progress=4, eta=est1)
+    entry1 = _run_one(tid, api1, phase1["tag"], "06", phase1, base_pct=4, span=43)
+    files1 = [x for x in entry1 if x.lower().endswith(".mp4")]
+    if not files1:
+        raise RuntimeError("第一阶段场景重拍没有生成视频")
+    scene_video = os.path.join(work, "scene-stage.mp4")
+    scene_src = os.path.join(comfy_output(), files1[0])
+    if not os.path.isfile(scene_src):
+        raise RuntimeError("第一阶段输出文件不存在")
+    shutil.move(scene_src, scene_video)
+
+    # AddGuide 的输入沿用原视频画布更稳定。第一阶段输出通常已经是目标分辨率，
+    # 但 H3 在部分尺寸上会因为引导视频与 latent 网格恰好重合而触发 patchify 形状错误。
+    # 先把中间场景片恢复到源视频画布，再由第二阶段按目标分辨率生成。
+    guide_video = scene_video
+    src_w = int(info.get("width") or 0)
+    src_h = int(info.get("height") or 0)
+    scene_info = probe_video(scene_video)
+    if src_w and src_h and (int(scene_info.get("width") or 0) != src_w
+                            or int(scene_info.get("height") or 0) != src_h):
+        guide_video = os.path.join(work, "scene-stage-guide.mp4")
+        run_ff([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+                "-i", scene_video, "-vf", f"scale={src_w}:{src_h}:flags=lanczos",
+                "-r", "24", "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", guide_video])
+    stage2_video = stage_asset(guide_video, sub=f"h3studio/{tid}_natural_two_phase")
+    phase2_prompt = (
+        "只替换源视频中的人物为角色参考图中的夏日黑土。\n"
+        "人物短黑发、白蓝夏日服装、白蓝宽檐帽、黄色花饰、蓝色凉鞋、脸型和整体身份以角色参考图为准。\n"
+        "保留第一阶段已经生成的卧室、床铺、床品、家具、光线、遮挡关系、镜头运动、人物动作、姿势和时间节奏，不重新设计背景，不恢复源视频人物，不添加水印。"
+    )
+    phase2 = dict(common)
+    phase2.update({
+        "video": stage2_video, "images": role_refs,
+        "target_groups": [{"description": groups[0]["description"], "images": role_refs}],
+        "natural_scene": False, "natural_route": "reference", "char_count": 0,
+        "prompt": phase2_prompt, "tag": f"06_{stamp}_phase2_role",
+    })
+    api2 = build_api("06", phase2)
+    est2 = estimate_seconds("04", phase2)
+    _upd(tid, stage="第 2/2 阶段：只替换人物", progress=50, eta=est2)
+    entry2 = _run_one(tid, api2, phase2["tag"], "04", phase2, base_pct=50, span=44)
+    files2 = [x for x in entry2 if x.lower().endswith(".mp4")]
+    if not files2:
+        raise RuntimeError("第二阶段人物替换没有生成视频")
+    _upd(tid, stage="导出两阶段成品", progress=95)
+    outputs = _export(files2, "06", stamp, p.get("export_name") or "06_两阶段场景人物替换")
+    if p.get("keep_audio", True):
+        _mux_original_audio(outputs, staged_video)
+    shutil.rmtree(work, ignore_errors=True)
+    _upd(tid, status="done", progress=100, stage="完成",
+         files=outputs, finished=time.time(), eta=0)
+
+
+def _run_natural(tid, p, stamp):
+    """自然语言替换入口，默认一键执行场景重拍后的人物替换。"""
+    groups = p.get("target_groups") or []
+    if p.get("two_phase", True) and len(groups) >= 2:
+        return _run_natural_two_phase(tid, p, stamp)
+    return _run_natural_single(tid, p, stamp)
 
 
 def _run_swap(tid, p, stamp):
