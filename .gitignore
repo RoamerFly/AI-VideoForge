@@ -1,0 +1,76 @@
+# Local environments and caches
+app/.venv/
+**/__pycache__/
+**/*.py[cod]
+.workbuddy/
+logs/
+temp_*/
+_face/
+_shot/
+
+# Build outputs and packaged applications
+build/
+dist/
+app/build/
+app/build_*/
+app/dist/
+release_build*/
+*.exe
+*.pkg
+*.spec.bak
+
+# Model weights and model shards
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.gguf
+*.pth
+*.onnx
+*.scail_chunks/
+release/models/
+
+# Generated media and temporary media assets
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.aac
+*.flac
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.tif
+*.tiff
+
+# Keep application icons and source diagrams when they are part of the app
+!app/icon.png
+!app/icon.ico
+
+# Runtime and local configuration
+**/config.json
+**/task-current.json
+**/task-v*.json
+**/history.json
+**/comfy.log
+**/ws.log
+**/error.log
+_wb_conv.json
+experiments/**/*.history.json
+experiments/**/*.run.json
+
+# Large generated experiment folders. Scripts and Markdown remain tracked.
+experiments/**/work/
+experiments/**/frames/
+experiments/**/v4frames/
+experiments/**/*.json
+experiments/**/*.log
+experiments/**/*.png
+experiments/**/*.jpg
+experiments/**/*.jpeg
+experiments/**/*.webp
+compare_exact_*/
+

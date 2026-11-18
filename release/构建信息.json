@@ -1,0 +1,23 @@
+{
+  "built_at": "2026-11-18T13:05:02",
+  "sha256": "ca187b0f798f13f95b5fbbca1dcfac1064c97effc321e4e68fdfbd72231b808d",
+  "size": 75806005,
+  "features": [
+    "H3固定分段流程",
+    "全身衣装/主脸/辅助角度分工",
+    "SAM3固定背景",
+    "断点续接",
+    "指定片段返修",
+    "真实采样步数",
+    "网络超时保留原任务",
+    "可选超分输出"
+  ],
+  "verification": {
+    "backend_checks": 10,
+    "browser_ui_payload": "pass",
+    "packaged_startup_and_dependencies": "pass",
+    "packaged_cached_pipeline_resume": "pass on preceding build; same pipeline hooks, latest build startup/resources checked",
+    "visual_quality": "未宣称通过；旧超分和768全图20步脸部均未达要求，局部512人脸重建仍试验"
+  },
+  "experimental_face_stage_in_exe": false
+}
